@@ -1,0 +1,55 @@
+#!/bin/bash
+set -e
+PASS="changeit"
+mkdir -p certs/{ca,broker1,broker2,broker3,client}
+
+echo "Создание CA..."
+openssl genrsa -out certs/ca/ca.key 2048
+openssl req -new -x509 -key certs/ca/ca.key -out certs/ca/ca.crt -days 365 -subj "/CN=KafkaCA"
+
+# Функция для создания сертификатов брокера
+create_broker_certs() {
+  local name=$1 host=$2
+  cd "certs/$name"
+  echo "Генерация сертификата для $name..."
+  
+  # Создаем keystore с ключом
+  keytool -genkeypair -alias "$name" -keyalg RSA -keystore "$name.keystore.jks" \
+    -storepass "$PASS" -keypass "$PASS" -validity 365 \
+    -dname "CN=$host, OU=IT, O=KafkaLab" -ext SAN=dns:$host,ip:127.0.0.1
+  
+  # Экспортируем запрос на подпись
+  keytool -certreq -alias "$name" -file "$name.csr" -keystore "$name.keystore.jks" -storepass "$PASS"
+  
+  # Подписываем сертификат нашим CA
+  openssl x509 -req -CA ../ca/ca.crt -CAkey ../ca/ca.key -in "$name.csr" \
+    -out "$name.crt" -days 365 -CAcreateserial
+  
+  # Импортируем CA и подписанный сертификат обратно в keystore
+  keytool -import -file ../ca/ca.crt -alias ca -keystore "$name.keystore.jks" -storepass "$PASS" -noprompt
+  keytool -import -file "$name.crt" -alias "$name" -keystore "$name.keystore.jks" -storepass "$PASS" -noprompt
+  
+  # Создаем truststore (содержит только CA сертификат)
+  keytool -import -file ../ca/ca.crt -alias ca -keystore "$name.truststore.jks" -storepass "$PASS" -noprompt
+  cd ../..
+}
+
+# Создаем сертификаты для всех брокеров
+create_broker_certs broker1 localhost
+create_broker_certs broker2 localhost
+create_broker_certs broker3 localhost
+
+# Создаем сертификат клиента
+cd certs/client
+keytool -genkeypair -alias client -keyalg RSA -keystore client.keystore.jks \
+  -storepass "$PASS" -keypass "$PASS" -validity 365 \
+  -dname "CN=kafka-client, OU=IT, O=KafkaLab"
+keytool -certreq -alias client -file client.csr -keystore client.keystore.jks -storepass "$PASS"
+openssl x509 -req -CA ../ca/ca.crt -CAkey ../ca/ca.key -in client.csr \
+  -out client.crt -days 365 -CAcreateserial
+keytool -import -file ../ca/ca.crt -alias ca -keystore client.keystore.jks -storepass "$PASS" -noprompt
+keytool -import -file client.crt -alias client -keystore client.keystore.jks -storepass "$PASS" -noprompt
+keytool -import -file ../ca/ca.crt -alias ca -keystore client.truststore.jks -storepass "$PASS" -noprompt
+cd ../..
+
+echo "Сертификаты созданы в папке certs/"
